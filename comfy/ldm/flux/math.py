@@ -23,7 +23,9 @@ def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
     omega = 1.0 / (theta**scale)
     out = torch.einsum("...n,d->...nd", pos.to(dtype=torch.float32, device=device), omega)
     out = torch.stack([torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1)
-    out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
+    # out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
+    b, n, d, ij = out.shape
+    out = out.reshape(b, n, d, 2, 2)
     return out.to(dtype=torch.float32, device=pos.device)
 
 

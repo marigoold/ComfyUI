@@ -62,6 +62,7 @@ class FluxClipModel(torch.nn.Module):
         if "text_model.encoder.layers.1.mlp.fc1.weight" in sd:
             return self.clip_l.load_sd(sd)
         else:
+            quantize_model(self.t5xxl.transformer, sd)
             return self.t5xxl.load_sd(sd)
 
 def flux_clip(dtype_t5=None):
@@ -69,3 +70,39 @@ def flux_clip(dtype_t5=None):
         def __init__(self, device="cpu", dtype=None):
             super().__init__(dtype_t5=dtype_t5, device=device, dtype=dtype)
     return FluxClipModel_
+
+
+def quantize_model(model: torch.nn.Module, new_state_dict):
+    # import ipdb; ipdb.set_trace()
+    for name, module in model.named_modules():
+        if not isinstance(module, torch.nn.Linear):
+            continue
+        # if not (name.startswith("double_blocks") or name.startswith("single_blocks")):
+        #     print(name)
+        #     continue
+        weight = new_state_dict[f"{name}.weight"]
+        if module.bias is not None:
+            module.bias.data = module.bias.data.to(torch.float16)
+        qweight, scale = fp8_quantize(weight)
+        module.weight.data = module.weight.data.to(torch.float8_e4m3fn)
+        module.weight.data.copy_(qweight.data)
+        # module.scale = scale
+        module.register_parameter("scale", torch.nn.Parameter(scale)) 
+        new_state_dict.pop(f"{name}.weight")
+            
+
+def fp8_quantize(weight, qdtype=torch.float8_e4m3fn):
+    device = weight.device
+    # weight, scale = quant_weights(weight, torch.int8, False)
+    finfo = torch.finfo(qdtype)
+    # Calculate the scale as dtype max divided by absmax
+    scale = finfo.max / weight.abs().max().clamp(min=1e-12)
+    # scale and clamp the tensor to bring it to
+    # the representative range of float8 data type
+    # (as default cast is unsaturated)
+    qweight = (weight * scale).clamp(min=finfo.min, max=finfo.max)
+    # Return both float8 data and the inverse scale (as float),
+    # as both required as inputs to torch._scaled_mm
+    qweight = qweight.to(qdtype)
+    scale = scale.float().reciprocal()
+    return qweight, scale

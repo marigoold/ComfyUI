@@ -95,6 +95,7 @@ class Flux(nn.Module):
         y: Tensor,
         guidance: Tensor = None,
     ) -> Tensor:
+        # import ipdb; ipdb.set_trace()
         if img.ndim != 3 or txt.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
 
@@ -128,15 +129,24 @@ class Flux(nn.Module):
         patch_size = 2
         x = comfy.ldm.common_dit.pad_to_patch_size(x, (patch_size, patch_size))
 
-        img = rearrange(x, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch_size, pw=patch_size)
+        # import ipdb; ipdb.set_trace()
+        # img = rearrange(x, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch_size, pw=patch_size)
+        ph, pw = patch_size, patch_size
+        img = x.reshape(bs, c, h // ph, ph, w // pw, pw).permute(0, 2, 4, 1, 3, 5).reshape(bs, h // ph * w // pw, c * ph * pw)
 
         h_len = ((h + (patch_size // 2)) // patch_size)
         w_len = ((w + (patch_size // 2)) // patch_size)
         img_ids = torch.zeros((h_len, w_len, 3), device=x.device, dtype=x.dtype)
         img_ids[..., 1] = img_ids[..., 1] + torch.linspace(0, h_len - 1, steps=h_len, device=x.device, dtype=x.dtype)[:, None]
         img_ids[..., 2] = img_ids[..., 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device, dtype=x.dtype)[None, :]
-        img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
+        # img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
+        img_ids = torch.repeat_interleave(img_ids[None, :], repeats=bs, dim=0).reshape(bs, -1, img_ids.shape[-1])
 
         txt_ids = torch.zeros((bs, context.shape[1], 3), device=x.device, dtype=x.dtype)
         out = self.forward_orig(img, img_ids, context, txt_ids, timestep, y, guidance)
+
+        bs, hw, cphpw = out.shape
+        img = out.reshape(bs, h_len, hw // h_len, cphpw // 2 // 2, 2, 2).permute(0, 3, 1, 4, 2, 5).reshape(bs, cphpw // 2 // 2, h_len * 2, w_len * 2)[:, :, :h, :w]
+        return img
+
         return rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=h_len, w=w_len, ph=2, pw=2)[:,:,:h,:w]

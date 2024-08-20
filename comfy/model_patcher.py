@@ -25,7 +25,7 @@ import collections
 
 import comfy.utils
 import comfy.model_management
-from comfy.types import UnetWrapperFunction
+from comfy.model_patcher_types import UnetWrapperFunction
 
 
 def weight_decompose(dora_scale, weight, lora_diff, alpha, strength):

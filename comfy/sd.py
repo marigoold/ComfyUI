@@ -1,5 +1,6 @@
 import torch
 from enum import Enum
+from typing import Dict
 import logging
 
 from comfy import model_management
@@ -108,6 +109,7 @@ class CLIP:
         return self.tokenizer.tokenize_with_weights(text, return_word_ids)
 
     def encode_from_tokens(self, tokens, return_pooled=False, return_dict=False):
+        # import ipdb; ipdb.set_trace()
         self.cond_stage_model.reset_clip_options()
 
         if self.layer_idx is not None:
@@ -131,6 +133,7 @@ class CLIP:
         return cond
 
     def encode(self, text):
+        # import ipdb; ipdb.set_trace()
         tokens = self.tokenize(text)
         return self.encode_from_tokens(tokens)
 
@@ -634,6 +637,7 @@ def load_unet_state_dict(sd, dtype=None): #load unet in diffusers or regular for
     model_config.set_inference_dtype(unet_dtype, manual_cast_dtype)
     model = model_config.get_model(new_sd, "")
     model = model.to(offload_device)
+    quantize_model(model, new_sd)
     model.load_model_weights(new_sd, "")
     left_over = sd.keys()
     if len(left_over) > 0:
@@ -667,3 +671,38 @@ def save_checkpoint(output_path, model, clip=None, vae=None, clip_vision=None, m
             sd[k] = t.contiguous()
 
     comfy.utils.save_torch_file(sd, output_path, metadata=metadata)
+
+
+def quantize_model(model: torch.nn.Module, new_state_dict: Dict[str, torch.Tensor]):
+    for name, module in model.diffusion_model.named_modules():
+        if not isinstance(module, torch.nn.Linear):
+            continue
+        if not (name.startswith("double_blocks") or name.startswith("single_blocks")):
+            print(name)
+            continue
+        weight = new_state_dict[f"{name}.weight"]
+        # if module.bias is not None:
+        #     module.bias.data = module.bias.data.to(torch.bfloat16)
+        qweight, scale = fp8_quantize(weight)
+        module.weight.data = module.weight.data.to(torch.float8_e4m3fn)
+        module.weight.data.copy_(qweight.data)
+        # module.scale = scale
+        module.register_parameter("scale", torch.nn.Parameter(scale)) 
+        new_state_dict.pop(f"{name}.weight")
+            
+
+def fp8_quantize(weight, qdtype=torch.float8_e4m3fn):
+    device = weight.device
+    # weight, scale = quant_weights(weight, torch.int8, False)
+    finfo = torch.finfo(qdtype)
+    # Calculate the scale as dtype max divided by absmax
+    scale = finfo.max / weight.abs().max().clamp(min=1e-12)
+    # scale and clamp the tensor to bring it to
+    # the representative range of float8 data type
+    # (as default cast is unsaturated)
+    qweight = (weight * scale).clamp(min=finfo.min, max=finfo.max)
+    # Return both float8 data and the inverse scale (as float),
+    # as both required as inputs to torch._scaled_mm
+    qweight = qweight.to(qdtype)
+    scale = scale.float().reciprocal()
+    return qweight, scale

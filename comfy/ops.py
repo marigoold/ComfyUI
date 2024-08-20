@@ -44,6 +44,22 @@ def cast_bias_weight(s, input=None, dtype=None, device=None):
         weight = s.weight_function(weight)
     return weight, bias
 
+def fp8_quantize(weight, qdtype=torch.float8_e4m3fn):
+    device = weight.device
+    # weight, scale = quant_weights(weight, torch.int8, False)
+    finfo = torch.finfo(qdtype)
+    # Calculate the scale as dtype max divided by absmax
+    scale = finfo.max / weight.abs().max().clamp(min=1e-12)
+    # scale and clamp the tensor to bring it to
+    # the representative range of float8 data type
+    # (as default cast is unsaturated)
+    qweight = (weight * scale).clamp(min=finfo.min, max=finfo.max)
+    # Return both float8 data and the inverse scale (as float),
+    # as both required as inputs to torch._scaled_mm
+    qweight = qweight.to(qdtype)
+    scale = scale.float().reciprocal()
+    return qweight, scale
+
 class CastWeightBiasOp:
     comfy_cast_weights = False
     weight_function = None
@@ -55,6 +71,21 @@ class disable_weight_init:
             return None
 
         def forward_comfy_cast_weights(self, input):
+            if hasattr(self, "scale"):
+                qinput, scale = fp8_quantize(input)
+                input_shape = qinput.shape
+                # print(qinput.shape, self.weight.shape)
+                output, _ = torch._scaled_mm(
+                    qinput.reshape(input_shape[-2:]),
+                    # self.qweight.t(),
+                    self.weight.t(),
+                    # out_dtype=self.dtype,
+                    out_dtype=input.dtype,
+                    scale_a=scale,
+                    scale_b=self.scale,
+                    bias=self.bias,
+                )
+                return output.reshape(*input_shape[:-1], output.shape[-1])
             weight, bias = cast_bias_weight(self, input)
             return torch.nn.functional.linear(input, weight, bias)
 
@@ -62,6 +93,22 @@ class disable_weight_init:
             if self.comfy_cast_weights:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
+                if hasattr(self, "scale"):
+                    input = args[0]
+                    qinput, scale = fp8_quantize(input)
+                    input_shape = qinput.shape
+                    # print(qinput.shape, self.weight.shape)
+                    output, _ = torch._scaled_mm(
+                        qinput.reshape(input_shape[-2:]),
+                        # self.qweight.t(),
+                        self.weight.t(),
+                        # out_dtype=self.dtype,
+                        out_dtype=input.dtype,
+                        scale_a=scale,
+                        scale_b=self.scale,
+                        bias=self.bias,
+                    )
+                    return output.reshape(*input_shape[:-1], output.shape[-1])
                 return super().forward(*args, **kwargs)
 
     class Conv1d(torch.nn.Conv1d, CastWeightBiasOp):
